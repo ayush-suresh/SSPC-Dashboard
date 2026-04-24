@@ -6,8 +6,29 @@ import datetime
 
 from extractor import (
     extract_from_files, get_top_defects,
-    get_rolling_stats, get_leak_trend, get_tip_trend
+    get_rolling_stats, get_leak_trend, get_tip_trend,
+    get_leak_trend_by_product, get_leak_valve_by_product,
+    get_leak_bond_by_product
 )
+
+# ── Product color scheme ──────────────────────────────────────────────────────
+PRODUCT_COLORS = {
+    "BLN":   "#1565C0",   # blue
+    "SMG":   "#424242",   # black (dark grey — visible on dark bg)
+    "CTI":   "#2e7d32",   # green
+    "MP3-M": "#e65100",   # orange
+    "MP3":   "#e65100",   # orange (combined MP3)
+    "MP3-S": "#bdbdbd",   # white / light grey
+    "BMD":   "#f9a825",   # yellow
+    "NFE":   "#e91e63",   # pink
+    "NFS":   "#e91e63",   # pink (alias)
+    "BLT":   "#fdd835",   # yellow (distinct from BMD)
+    "BBB":   "#6d4c41",   # brown
+}
+
+def prod_color(prod):
+    """Return the standard color for a product code."""
+    return PRODUCT_COLORS.get(str(prod).upper(), "#8fa3b8")
 
 st.set_page_config(page_title="SSPC Quality Dashboard", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
@@ -66,22 +87,44 @@ def sec(t):
 PLOT = dict(
     plot_bgcolor="#1e2a3a", paper_bgcolor="#1e2a3a",
     font=dict(color="white", family="Arial"),
-    margin=dict(t=40, b=30, l=10, r=10),
     legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="white")),
 )
+PLOT_MARGIN = dict(t=40, b=30, l=10, r=10)  # default margin, override per chart
 
 def line_fig(df_t, title, ytitle, cols_colors, yfmt=".2%", height=320):
+    import numpy as np
     fig = go.Figure()
     for col, color in cols_colors:
         if col not in df_t.columns: continue
+        # Fill NaN with 0 so missing months show as 0, not gaps
+        vals = df_t[col].fillna(0).tolist()
+        avg  = float(np.mean(vals))
+        std  = float(np.std(vals)) if len(vals) > 1 else 0
+        # Std dev band
         fig.add_trace(go.Scatter(
-            x=df_t["label"], y=df_t[col], name=col,
+            x=list(df_t["label"]) + list(df_t["label"])[::-1],
+            y=[avg+std]*len(df_t) + [avg-std]*len(df_t),
+            fill="toself",
+            fillcolor=color.replace(")", ",0.12)").replace("rgb","rgba")
+                if color.startswith("rgb") else
+                f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.12)",
+            line=dict(color="rgba(0,0,0,0)"),
+            showlegend=False, hoverinfo="skip",
+            name=f"{col} ±1σ"))
+        # Avg line
+        fig.add_trace(go.Scatter(
+            x=df_t["label"], y=[avg]*len(df_t),
+            mode="lines", line=dict(color=color, width=1, dash="dot"),
+            showlegend=False, hoverinfo="skip", name=f"{col} avg"))
+        # Main line
+        fig.add_trace(go.Scatter(
+            x=df_t["label"], y=vals, name=col,
             mode="lines+markers",
             line=dict(color=color, width=3),
             marker=dict(size=8, color=color),
-            text=[f"{v:{yfmt}}" for v in df_t[col]],
+            text=[f"{v:{yfmt}}" for v in vals],
             hovertemplate="%{x}<br>" + col + ": %{text}<extra></extra>"))
-    fig.update_layout(**PLOT, height=height,
+    fig.update_layout(**PLOT, height=height, margin=PLOT_MARGIN,
         title=dict(text=title, font=dict(color="white", size=13)),
         yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
                    tickformat=yfmt, title=ytitle),
@@ -104,25 +147,23 @@ if "manual_notes" not in st.session_state:
 with st.sidebar:
     st.markdown("## 📊 SSPC Quality")
     st.markdown("---")
-    st.markdown("### Upload DOR Files")
-    aust_file = st.file_uploader("AuST DOR (.xlsm / .xlsx)",
-                                  type=["xlsm","xlsx"], key="aust")
-    cp_file   = st.file_uploader("CenterPoint DOR (.xlsm / .xlsx)",
-                                  type=["xlsm","xlsx"], key="cp")
+    st.markdown("### Upload DOR File")
+    dor_file = st.file_uploader("DOR File (.xlsm / .xlsx)",
+                                  type=["xlsm","xlsx"], key="dor")
 
-    if aust_file and cp_file:
-        if st.button("▶  Process Files", use_container_width=True, type="primary"):
-            with st.spinner("Reading files and computing COPQ…"):
-                data, errors = extract_from_files(
-                    aust_file.read(), cp_file.read()
-                )
+    if dor_file:
+        if st.button("▶  Process File", use_container_width=True, type="primary"):
+            with st.spinner("Reading file and computing COPQ…"):
+                file_bytes = dor_file.read()
+                data, errors = extract_from_files(file_bytes, file_bytes)
             if errors:
                 for e in errors: st.error(e)
             else:
                 st.session_state.data = data
                 st.success(f"✅ {len(data['months'])} months loaded")
     else:
-        st.info("Upload both files above, then click Process.")
+        st.info("Upload the DOR file above, then click Process.")
+
 
     st.markdown("---")
 
@@ -160,7 +201,7 @@ if st.session_state.data is None:
           <div style="font-size:48px;margin-bottom:12px">📂</div>
           <h3 style="color:#8fa3b8;margin:0 0 8px">Upload Your DOR Files</h3>
           <p style="color:#6a7f94;margin:0 0 16px">
-            Upload the AuST and CenterPoint DOR files in the sidebar,<br>
+            Upload the DOR file (contains both AuST &amp; CenterPoint)<br><br>
             then click <b>Process Files</b>.
           </p>
           <p style="color:#4a5a6a;font-size:13px;margin:0">
@@ -203,7 +244,7 @@ def pv(col):
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 tabs = st.tabs(["🏭 Overview", "💰 COPQ",
-                "📅 Daily Tracker", "📋 Actions", "🎯 Goals"])
+                "📅 Daily Tracker", "📋 Actions", "⏱ Hour by Hour", "📉 Downtime", "🎯 Goals"])
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════
@@ -252,7 +293,7 @@ with tabs[0]:
         sec("Costed Yield by Product")
         prods  = ["BLN", "SMG", "CTI", "BMD", "MP3"]
         yields = [cv(f"{p.lower()}_yield") for p in prods]
-        pcols  = ["#2e75b6","#70ad47","#ffc000","#e05c5c","#9b59b6"]
+        pcols  = [prod_color(p) for p in prods]
         fig2   = go.Figure()
         for p, y, c in zip(prods, yields, pcols):
             if y and y > 0:
@@ -263,16 +304,16 @@ with tabs[0]:
         fig2.add_hline(y=0.90, line_dash="dash", line_color="#8fa3b8",
                        annotation_text="90% target",
                        annotation_font_color="#8fa3b8")
-        fig2.update_layout(**PLOT, height=300, showlegend=False,
+        fig2.update_layout(**PLOT, margin=PLOT_MARGIN, height=300, showlegend=False,
             yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
                        tickformat=".0%", range=[0, 1.08]),
             xaxis=dict(showgrid=False))
         st.plotly_chart(fig2, use_container_width=True)
 
     with c2:
-        sec("CoPQ/Part — Rolling 6 Months with Avg ± 1 Std Dev")
+        sec("CoPQ/Part — Rolling 12 Months with Avg ± 1 Std Dev")
         df_roll, avg_cpp, std_cpp = get_rolling_stats(
-            df_copq, "copq_per_part", 6)
+            df_copq, "copq_per_part", 12)
         if not df_roll.empty:
             x_vals = list(df_roll["label"])
             y_vals = df_roll["copq_per_part"].fillna(0).tolist()
@@ -296,7 +337,7 @@ with tabs[0]:
                             line_color="#8fa3b8",
                             annotation_text=f"Avg ${avg_cpp:.2f}",
                             annotation_font_color="#8fa3b8")
-            fig_r.update_layout(**PLOT, height=300,
+            fig_r.update_layout(**PLOT, margin=PLOT_MARGIN, height=300,
                 yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
                            tickprefix="$"),
                 xaxis=dict(showgrid=False))
@@ -305,111 +346,155 @@ with tabs[0]:
     # Defect Analysis
     sec(f"Defect Analysis — {sel_label}")
     top10 = get_top_defects(df_scrap, sel_year, sel_month)
-    d1, d2 = st.columns([3, 2])
+    mdf   = df_scrap[(df_scrap["year"] == sel_year) &
+                      (df_scrap["month"] == sel_month)]
 
+    DC_AUST = {
+        "Leak - valve":16.43,"Leak - bond":16.43,"Scratch":16.43,"Dirty":16.43,
+        "Wire at Tip":11.08,"Destroyed Tip":11.08,
+        "Fiber/ Embedded Particulate":13.38,"Skive":9.21,"Kink":16.43,
+        "Burn":16.43,"Damaged/ Melted Hub":16.43,"Unknown Reflow Time":9.21,
+        "Cut Short":16.43,"Pin Holes in Heat Shrink":9.21,"Tip Bleed":11.08,
+        "Irregular Braid":1.82,"Hole at Tip":11.08,"Marker":16.43,
+        "Wrong Valve Position":16.43,"Flash OD":11.08,"Stress Marks (Hub)":16.43,
+        "Destructive Test":16.43,"Extrusions in Wrong Order":9.21,"Other":16.43,
+        "Gap during Reflow":9.21,"Irregular Liner at Tip":16.43,
+    }
+    DC_CP = {k: 22.08 for k in DC_AUST}
+    DC_CP.update({"Leak - valve":22.51,"Leak - bond":22.51})
+
+    def _defect_cost(name):
+        aq = float(mdf[mdf["entity"]=="AuST"][name].sum()) if name in mdf.columns else 0
+        cq = float(mdf[mdf["entity"]=="CenterPoint"][name].sum()) if name in mdf.columns else 0
+        return aq * DC_AUST.get(name,16.43) + cq * DC_CP.get(name,22.08)
+
+    d1, d2 = st.columns([3, 2])
     with d1:
         if top10:
             names  = [x[0] for x in top10]
             values = [x[1] for x in top10]
             pcts   = [x[2] for x in top10]
-            bcols  = ["#c00000" if i == 0 else
-                      "#2e75b6" if i < 3 else "#4472c4"
+            costs  = [_defect_cost(n) for n in names]
+            bcols  = ["#c00000" if i==0 else "#2e75b6" if i<3 else "#4472c4"
                       for i in range(len(names))]
             fig3 = go.Figure(go.Bar(
-                y=names[::-1], x=values[::-1],
-                orientation="h", marker_color=bcols[::-1],
-                text=[f"{int(v)} ({p:.1%})"
-                      for v, p in zip(values[::-1], pcts[::-1])],
+                x=names, y=values,
+                marker_color=bcols,
+                text=[f"{int(v)}<br>({p:.1%})<br>${c:,.0f}"
+                      for v,p,c in zip(values, pcts, costs)],
                 textposition="outside",
-                textfont=dict(color="white", size=11),
-                hovertemplate="%{y}: %{x}<extra></extra>"))
-            fig3.update_layout(**PLOT, height=400,
-                title=dict(text="Top 10 Failure Modes — Count & % of Total",
+                textfont=dict(color="white", size=10),
+                hovertemplate="%{x}: %{y} units<extra></extra>"))
+            fig3.update_layout(**PLOT, margin=PLOT_MARGIN, height=440,
+                title=dict(text="Top 10 Failure Modes — Count · % · Cost",
                            font=dict(color="white", size=13)),
-                xaxis=dict(showgrid=True, gridcolor="#2a3a4a"),
-                yaxis=dict(showgrid=False, tickfont=dict(size=11)))
+                xaxis=dict(showgrid=False, tickangle=-30, tickfont=dict(size=10)),
+                yaxis=dict(showgrid=True, gridcolor="#2a3a4a", title="Units"))
             st.plotly_chart(fig3, use_container_width=True)
         else:
             st.info("No defect data for this month.")
 
     with d2:
-        mdf = df_scrap[(df_scrap["year"] == sel_year) &
-                        (df_scrap["month"] == sel_month)]
         lv = float(mdf["Leak - valve"].sum())
         lb = float(mdf["Leak - bond"].sum())
         tl = lv + lb
         if tl > 0:
-            st.markdown(f"""<div style="background:#1e2a3a;border-radius:10px;
+            st.markdown(f'''<div style="background:#1e2a3a;border-radius:10px;
                 padding:16px;margin-bottom:12px;border:1px solid #2e4a6a">
               <div style="color:#8fa3b8;font-size:11px;font-weight:700;
                 letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">
                 Leak Breakdown</div>
-              <div style="display:flex;justify-content:space-between;
-                margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;margin-bottom:8px">
                 <span style="color:#fff">Total Leak</span>
-                <span style="color:#ffc000;font-weight:700;font-size:18px">
-                  {int(tl)}</span>
+                <span style="color:#ffc000;font-weight:700;font-size:18px">{int(tl)}</span>
               </div>
-              <div style="display:flex;justify-content:space-between;
-                margin-bottom:6px">
-                <span style="color:#8fa3b8;font-size:12px">
-                  ↳ Leak — Valve</span>
-                <span style="color:#e05c5c;font-weight:600">
-                  {int(lv)} ({lv/tl:.0%})</span>
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                <span style="color:#8fa3b8;font-size:12px">↳ Leak — Valve</span>
+                <span style="color:#e05c5c;font-weight:600">{int(lv)} ({lv/tl:.0%})</span>
               </div>
               <div style="display:flex;justify-content:space-between">
-                <span style="color:#8fa3b8;font-size:12px">
-                  ↳ Leak — Bond</span>
-                <span style="color:#ff7c00;font-weight:600">
-                  {int(lb)} ({lb/tl:.0%})</span>
+                <span style="color:#8fa3b8;font-size:12px">↳ Leak — Bond</span>
+                <span style="color:#ff7c00;font-weight:600">{int(lb)} ({lb/tl:.0%})</span>
               </div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            combined = float(mdf["Leak"].sum())
-            if combined > 0:
-                st.markdown(f"""<div style="background:#1e2a3a;
-                    border-radius:10px;padding:16px;margin-bottom:12px;
-                    border:1px solid #2e4a6a">
-                  <div style="color:#8fa3b8;font-size:11px;font-weight:700;
-                    letter-spacing:1px;text-transform:uppercase;
-                    margin-bottom:8px">Leak</div>
-                  <div style="display:flex;justify-content:space-between">
-                    <span style="color:#fff">Total Leak</span>
-                    <span style="color:#ffc000;font-weight:700;
-                      font-size:18px">{int(combined)}</span>
-                  </div>
-                </div>""", unsafe_allow_html=True)
+            </div>''', unsafe_allow_html=True)
         if top10:
             df_t = pd.DataFrame(
-                [(x[0], int(x[1]), f"{x[2]:.1%}") for x in top10],
-                columns=["Defect Mode", "Count", "% of Total"])
-            df_t.index = range(1, len(df_t) + 1)
-            st.dataframe(df_t, use_container_width=True, height=300)
+                [(x[0], int(x[1]), f"{x[2]:.1%}", f"${_defect_cost(x[0]):,.0f}")
+                 for x in top10],
+                columns=["Defect Mode","Count","% of Total","Est. Cost"])
+            df_t.index = range(1, len(df_t)+1)
+            st.dataframe(df_t, use_container_width=True, height=340)
 
-    # 6-Month Trends
-    sec("6-Month Trend Analysis")
+    # Product breakdown per failure mode
+    if top10:
+        sec("Scrap by Product — Top Failure Modes")
+        products = ["BLN","SMG","CTI","BMD","MP3","NFE","BLT"]
+        fig_prod = go.Figure()
+        for prod in products:
+            pm = mdf[mdf["product"]==prod]
+            if pm.empty: continue
+            yvals = [float(pm[n].sum()) if n in pm.columns else 0 for n,_,_ in top10]
+            if sum(yvals)==0: continue
+            fig_prod.add_trace(go.Bar(
+                name=prod,
+                x=[x[0] for x in top10],
+                y=yvals,
+                marker_color=prod_color(prod),
+                hovertemplate=f"<b>{prod}</b><br>%{{x}}: %{{y:.0f}} units<extra></extra>",
+            ))
+        fig_prod.update_layout(**PLOT, margin=PLOT_MARGIN, height=360,
+            barmode="stack",
+            title=dict(text="Which Product Drives Each Failure Mode",
+                       font=dict(color="white", size=13)),
+            xaxis=dict(showgrid=False, tickangle=-25, tickfont=dict(size=10)),
+            yaxis=dict(showgrid=True, gridcolor="#2a3a4a", title="Units"))
+        st.plotly_chart(fig_prod, use_container_width=True)
+
+    # 12-Month Trends
+    sec("12-Month Trend Analysis")
+    leak_trend    = get_leak_trend(df_scrap, df_copq)
+    leak_valve_df = get_leak_valve_by_product(df_scrap, df_copq)
+    leak_bond_df  = get_leak_bond_by_product(df_scrap, df_copq)
+
     t1, t2 = st.columns(2)
-    leak_trend = get_leak_trend(df_scrap, df_copq)
-    tip_trend  = get_tip_trend(df_scrap, df_copq)
     with t1:
         if not leak_trend.empty:
             st.plotly_chart(
-                line_fig(leak_trend, "Leak Rate Trend (Last 6 Months)",
+                line_fig(leak_trend, "Leak Rate — AuST vs CenterPoint (12 Months)",
                          "Leak Rate",
                          [("AuST","#2e75b6"),("CenterPoint","#70ad47")]),
                 use_container_width=True)
         else:
             st.info("Need at least 2 months of data.")
+
     with t2:
-        if not tip_trend.empty:
-            st.plotly_chart(
-                line_fig(tip_trend,
-                         "Destroyed Tip Rate Trend (Last 6 Months)",
-                         "Tip Rate",
-                         [("AuST","#2e75b6"),("CenterPoint","#e05c5c")]),
-                use_container_width=True)
-        else:
-            st.info("Need at least 2 months of data.")
+        if not leak_valve_df.empty:
+            prods = [c for c in ["BLN","SMG","CTI","BMD","MP3","NFE","BLT"]
+                     if c in leak_valve_df.columns
+                     and leak_valve_df[c].notna().any()]
+            if prods:
+                st.plotly_chart(
+                    line_fig(leak_valve_df,
+                             "Leak — Valve Rate by Product (12 Months)",
+                             "Valve Leak Rate",
+                             [(p, prod_color(p)) for p in prods]),
+                    use_container_width=True)
+
+    t3, t4 = st.columns(2)
+    with t3:
+        if not leak_bond_df.empty:
+            prods = [c for c in ["BLN","SMG","CTI","BMD","MP3","NFE","BLT"]
+                     if c in leak_bond_df.columns
+                     and leak_bond_df[c].notna().any()]
+            if prods:
+                st.plotly_chart(
+                    line_fig(leak_bond_df,
+                             "Leak — Bond Rate by Product (12 Months)",
+                             "Bond Leak Rate",
+                             [(p, prod_color(p)) for p in prods]),
+                    use_container_width=True)
+    with t4:
+        pass  # placeholder for future chart
 
     # Leak Summary KPIs
     sec("Leak Rate Summary")
@@ -474,7 +559,7 @@ with tabs[1]:
             text=[fmt_c(v) for v in vals],
             textposition="outside",
             textfont=dict(color="white", size=11)))
-        fig.update_layout(**PLOT, height=320, showlegend=False,
+        fig.update_layout(**PLOT, margin=PLOT_MARGIN, height=320, showlegend=False,
             yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
                        tickprefix="$", tickformat=",.0f"),
             xaxis=dict(showgrid=False))
@@ -511,7 +596,7 @@ with tabs[1]:
                         line_color="#8fa3b8",
                         annotation_text=f"Avg ${avg_all:.2f}",
                         annotation_font_color="#8fa3b8")
-        fig_c.update_layout(**PLOT, height=320, showlegend=False,
+        fig_c.update_layout(**PLOT, margin=PLOT_MARGIN, height=320, showlegend=False,
             yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
                        tickprefix="$"),
             xaxis=dict(showgrid=False, tickangle=-35))
@@ -547,34 +632,138 @@ with tabs[1]:
     fig_prod = go.Figure(go.Bar(
         x=list(prod_costs.keys()),
         y=list(prod_costs.values()),
-        marker_color=["#2e75b6","#70ad47","#ffc000","#e05c5c","#9b59b6"],
+        marker_color=[prod_color(p) for p in ["BLN","SMG","CTI","BMD","MP3"]],
         text=[fmt_c(v) for v in prod_costs.values()],
         textposition="outside",
         textfont=dict(color="white", size=12)))
-    fig_prod.update_layout(**PLOT, height=300, showlegend=False,
+    fig_prod.update_layout(**PLOT, margin=PLOT_MARGIN, height=300, showlegend=False,
         yaxis=dict(showgrid=True, gridcolor="#2a3a4a", tickprefix="$"),
         xaxis=dict(showgrid=False))
     st.plotly_chart(fig_prod, use_container_width=True)
 
-    # Historical table
-    sec("Monthly COPQ History")
-    df_hist = df_copq.copy()
-    df_hist["Month"] = df_hist.apply(
-        lambda r: f"{calendar.month_abbr[int(r.month)]} {int(r.year)}",
-        axis=1)
-    df_hist["AuST Scrap"]   = df_hist["aust_scrap"].apply(fmt_c)
-    df_hist["CP Scrap"]     = df_hist["cp_scrap"].apply(fmt_c)
-    df_hist["Total Scrap"]  = df_hist["total_scrap"].apply(fmt_c)
-    df_hist["Costed Yield"] = df_hist["costed_yield"].apply(fmt_p)
-    df_hist["CoPQ/Part"]    = df_hist["copq_per_part"].apply(
-        lambda v: f"${v:.2f}" if pd.notna(v) else "—")
-    df_hist["Cumul. Leak"]  = df_hist["cumul_leak"].apply(fmt_p)
-    st.dataframe(
-        df_hist[["Month","AuST Scrap","CP Scrap","Total Scrap",
-                 "Costed Yield","CoPQ/Part","Cumul. Leak"]]
-        .sort_values("Month", ascending=False),
-        use_container_width=True, hide_index=True)
+    # Weighted Average COPQ View
+    sec("COPQ Normalised View — Weighted by Volume")
+    st.markdown("""<div style="color:#8fa3b8;font-size:12px;margin-bottom:12px">
+      Because production volume varies month to month, simple averages overstate
+      low-volume months. The charts below weight each month's COPQ by the number
+      of good CP units built that month, giving a volume-adjusted picture.
+    </div>""", unsafe_allow_html=True)
 
+    df_wt = df_copq.copy()
+    df_wt["label"] = df_wt.apply(
+        lambda r: f"{calendar.month_abbr[int(r.month)]} {int(r.year)}", axis=1)
+    df_wt = df_wt[df_wt["good_cp"].notna() & (df_wt["good_cp"] > 0)].copy()
+
+    if not df_wt.empty:
+        # Weighted CoPQ/Part = total_scrap_cost / total_good_cp_units
+        total_scrap  = df_wt["total_scrap"].fillna(0).sum()
+        total_good   = df_wt["good_cp"].sum()
+        weighted_cpp = total_scrap / total_good if total_good > 0 else 0
+
+        # Simple avg for comparison
+        simple_avg   = df_wt["copq_per_part"].dropna().mean()
+        diff         = weighted_cpp - simple_avg
+
+        wk1, wk2, wk3 = st.columns(3)
+        with wk1:
+            kpi("Weighted CoPQ/Part",
+                f"${weighted_cpp:.2f}",
+                f'<div class="kpi-delta-neutral">Weighted by CP good units</div>',
+                "#ffc000")
+        with wk2:
+            kpi("Simple Average CoPQ/Part",
+                f"${simple_avg:.2f}",
+                f'<div class="kpi-delta-neutral">Unweighted monthly avg</div>',
+                "#2e75b6")
+        with wk3:
+            col = "#00c853" if diff < 0 else "#e05c5c"
+            diff_label = ("Weighted is lower — high-volume months are better quality"
+                          if diff < 0 else
+                          "Weighted is higher — high-volume months have worse quality")
+            kpi("Difference",
+                f"${abs(diff):.2f}",
+                f'<div style="color:{col};font-size:11px;margin-top:4px">'
+                f'{diff_label}</div>',
+                col)
+
+        # Scrap cost per good unit over time (normalised)
+        df_wt["scrap_per_unit"] = df_wt["total_scrap"] / df_wt["good_cp"]
+        import numpy as np
+        vals = df_wt["scrap_per_unit"].fillna(0).tolist()
+        avg  = float(np.mean(vals)); std = float(np.std(vals))
+
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            sec("Scrap Cost per Good Unit — All Months")
+            fig_wt = go.Figure()
+            bar_cols = ["#ffc000" if lbl == sel_label else
+                        "#c00000" if v == max(vals) else
+                        "#00c853" if v == min(vals) else "#2e75b6"
+                        for lbl, v in zip(df_wt["label"], vals)]
+            fig_wt.add_trace(go.Bar(
+                x=df_wt["label"], y=vals,
+                marker_color=bar_cols,
+                text=[f"${v:.2f}" for v in vals],
+                textposition="outside",
+                textfont=dict(color="white", size=9),
+                hovertemplate="%{x}<br>$%{y:.2f}/unit<extra></extra>"))
+            fig_wt.add_hrect(y0=avg-std, y1=avg+std,
+                             fillcolor="rgba(46,117,182,0.12)", line_width=0)
+            fig_wt.add_hline(y=avg, line_dash="dash", line_color="#8fa3b8",
+                             annotation_text=f"Avg ${avg:.2f}",
+                             annotation_font_color="#8fa3b8")
+            fig_wt.update_layout(**PLOT, margin=PLOT_MARGIN, height=320,
+                showlegend=False,
+                yaxis=dict(showgrid=True, gridcolor="#2a3a4a", tickprefix="$"),
+                xaxis=dict(showgrid=False, tickangle=-40,
+                           tickfont=dict(size=9)))
+            st.plotly_chart(fig_wt, use_container_width=True)
+
+        with wc2:
+            sec("Total Scrap Cost vs Good Units Built")
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Bar(
+                name="Total Scrap $",
+                x=df_wt["label"], y=df_wt["total_scrap"].fillna(0),
+                marker_color="#e05c5c",
+                hovertemplate="%{x}<br>Scrap: $%{y:,.0f}<extra></extra>",
+                yaxis="y"))
+            fig_sc.add_trace(go.Scatter(
+                name="Good CP Units",
+                x=df_wt["label"], y=df_wt["good_cp"],
+                mode="lines+markers",
+                line=dict(color="#70ad47", width=2),
+                marker=dict(size=6),
+                hovertemplate="%{x}<br>Good Units: %{y:,.0f}<extra></extra>",
+                yaxis="y2"))
+            fig_sc.update_layout(**PLOT, margin=PLOT_MARGIN, height=320,
+                barmode="group",
+                yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
+                           tickprefix="$", title="Scrap Cost"),
+                yaxis2=dict(overlaying="y", side="right",
+                            showgrid=False, title="Good Units"),
+                xaxis=dict(showgrid=False, tickangle=-40,
+                           tickfont=dict(size=9)))
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+        # Scrap cost breakdown table — normalised
+        sec("Monthly COPQ — Normalised Detail")
+        df_tbl = df_wt[["label","total_scrap","good_cp","scrap_per_unit",
+                         "costed_yield","cumul_leak"]].copy()
+        df_tbl.columns = ["Month","Total Scrap","Good CP Units",
+                          "Scrap $/Unit","Costed Yield","Cumul. Leak"]
+        df_tbl["Total Scrap"]   = df_tbl["Total Scrap"].apply(fmt_c)
+        df_tbl["Good CP Units"] = df_tbl["Good CP Units"].apply(
+            lambda v: f"{int(v):,}" if pd.notna(v) else "—")
+        df_tbl["Scrap $/Unit"]  = df_tbl["Scrap $/Unit"].apply(
+            lambda v: f"${v:.2f}" if pd.notna(v) else "—")
+        df_tbl["Costed Yield"]  = df_tbl["Costed Yield"].apply(fmt_p)
+        df_tbl["Cumul. Leak"]   = df_tbl["Cumul. Leak"].apply(fmt_p)
+        df_tbl = df_tbl.sort_values("Month", ascending=False)
+        df_tbl.index = range(1, len(df_tbl)+1)
+        st.dataframe(df_tbl, use_container_width=True, hide_index=True)
+    else:
+        st.info("Not enough data for weighted analysis.")
 
 # ╔══════════════════════════════════════════════════════════════════════════════
 # ║  TAB 3 — DAILY TRACKER
@@ -599,32 +788,56 @@ with tabs[2]:
                 fac_dem  = demand_m[demand_m["facility"] == facility]
                 if fac_prod.empty: continue
                 actual_by_prod = fac_prod.groupby("product")["qty"].sum()
-                st.markdown(f"**{facility}**")
+                total_actual   = int(actual_by_prod.sum())
+                total_plan_row = fac_dem["plan"].sum()
+                total_plan     = int(total_plan_row) if total_plan_row > 0 else None
+
+                # Header row with facility name and totals
+                total_pct = total_actual/total_plan if total_plan else None
+                total_col = ("#00c853" if total_pct and total_pct >= 1 else
+                             "#ff7c00" if total_pct and total_pct >= 0.9 else
+                             "#e05c5c")
+                st.markdown(
+                    f'''<div style="display:flex;align-items:center;
+                        justify-content:space-between;margin-bottom:8px">
+                      <b style="color:#fff;font-size:14px">{facility}</b>
+                      <span style="color:{total_col};font-size:13px;font-weight:600">
+                        Total: {total_actual:,} built
+                        {f"/ {total_plan:,} planned ({total_pct:.1%})"
+                         if total_plan else "/ no plan set"}
+                      </span>
+                    </div>''', unsafe_allow_html=True)
+
                 col_list = list(actual_by_prod.items())
                 if col_list:
                     cols = st.columns(len(col_list))
                     for i, (prod, actual) in enumerate(col_list):
                         plan_row = fac_dem[fac_dem["product"] == prod]["plan"]
-                        plan = float(plan_row.iloc[0]) \
-                               if not plan_row.empty else None
-                        pct  = actual/plan if plan and plan > 0 else None
-                        color = ("#00c853" if pct and pct >= 1 else
-                                 "#ff7c00" if pct and pct >= 0.9 else
-                                 "#e05c5c")
+                        plan = float(plan_row.iloc[0])                                if not plan_row.empty and float(plan_row.iloc[0]) > 0                                else None
+                        pct  = actual/plan if plan else None
+                        # Color: green=at/above plan, orange=90-99%, red=below 90%
+                        # If no plan: use product color
+                        perf_color = ("#00c853" if pct and pct >= 1 else
+                                      "#ff7c00" if pct and pct >= 0.9 else
+                                      "#e05c5c")
+                        accent = perf_color if plan else prod_color(prod)
+                        if plan:
+                            delta = (f'<div style="color:{perf_color};'
+                                     f'font-size:11px;margin-top:4px">'
+                                     f'{"✅" if pct >= 1 else "⚠️"} '
+                                     f'{pct:.1%} of {int(plan):,} planned'
+                                     f'</div>')
+                        else:
+                            delta = (f'<div style="color:{prod_color(prod)};'
+                                     f'font-size:11px;margin-top:4px">'
+                                     f'No plan — {actual/total_actual:.1%} of total'
+                                     f'</div>')
                         with cols[i]:
-                            kpi(prod, f"{int(actual):,}",
-                                f'<div style="color:{color};font-size:11px;'
-                                f'margin-top:4px">'
-                                f'{"✅" if pct and pct>=1 else "⚠️"} '
-                                f'{fmt_p(pct)} of {int(plan):,} planned'
-                                f'</div>'
-                                if plan else
-                                '<div class="kpi-delta-neutral">'
-                                'No plan set</div>',
-                                accent=color)
+                            kpi(prod, f"{int(actual):,}", delta, accent=accent)
+                st.markdown("<div style='margin-bottom:16px'></div>",
+                            unsafe_allow_html=True)
         else:
             st.info("No demand plan data found.")
-
         # Day vs Swing production
         sec("Daily Production — Day vs Swing Shift")
         daily = mdf_prod.groupby(["date","facility","shift"]).agg(
@@ -645,7 +858,7 @@ with tabs[2]:
                     hovertemplate=(
                         f"{shift}<br>%{{x}}: %{{y:,}} units"
                         "<extra></extra>")))
-            fig_daily.update_layout(**PLOT, height=280,
+            fig_daily.update_layout(**PLOT, margin=PLOT_MARGIN, height=280,
                 barmode="group",
                 title=dict(
                     text=f"{facility} — Daily Production by Shift",
@@ -681,7 +894,7 @@ with tabs[2]:
                     hovertemplate=(
                         f"{shift}<br>%{{x}}: %{{text}}"
                         "<extra></extra>")))
-            fig_rr.update_layout(**PLOT, height=240,
+            fig_rr.update_layout(**PLOT, margin=PLOT_MARGIN, height=240,
                 title=dict(
                     text=f"{facility} — Reject Rate by Shift",
                     font=dict(color="white", size=13)),
@@ -909,9 +1122,567 @@ with tabs[3]:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════
-# ║  TAB 5 — GOALS
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  SHARED HxH PARSER
+# ╚══════════════════════════════════════════════════════════════════════════════
+def _parse_hxh_bytes(content_bytes):
+    import io as _io, zipfile as _zf
+    def _parse_one(raw_bytes):
+        df = pd.read_csv(_io.BytesIO(raw_bytes), encoding="latin1", header=None)
+        def sf(v):
+            if pd.isna(v): return None
+            s = str(v).strip()
+            if s in ("","nan","#REF!","#VALUE!"): return None
+            try: return float(s)
+            except: return s
+        r2 = df.iloc[1]
+        meta = {
+            "date":str(sf(r2[8]) or ""),"lot":str(sf(r2[13]) or ""),
+            "product":str(sf(r2[19]) or ""),"shift":str(sf(r2[23]) or ""),
+            "duration":str(sf(r2[28]) or ""),
+        }
+        is_aust = any("Liner Prep" in str(df.iloc[r][1]) for r in range(24,35) if pd.notna(df.iloc[r][1]))
+        facility = "AuST" if is_aust else "CenterPoint"
+        present = absent = 0
+        for ridx in range(6,12):
+            row = df.iloc[ridx]
+            for cidx,val in enumerate(row):
+                if str(val).strip() == "Total Operators Present":
+                    nrow = df.iloc[ridx+1] if ridx+1<len(df) else None
+                    if nrow is not None:
+                        v = sf(nrow[cidx])
+                        try: present = int(float(v)) if v else present
+                        except: pass
+                if str(val).strip().startswith("Total Operators Absent"):
+                    nrow = df.iloc[ridx+1] if ridx+1<len(df) else None
+                    if nrow is not None:
+                        v = sf(nrow[cidx])
+                        try: absent = int(float(v)) if v else absent
+                        except: pass
+        # Downtime code legend
+        dt_legend = {}
+        desc_col = 15 if is_aust else 18
+        code_col = 19 if is_aust else 22
+        for ridx in range(47,90):
+            row = df.iloc[ridx]
+            desc = str(sf(row[desc_col]) or "") if desc_col < len(row) else ""
+            code = str(sf(row[code_col]) or "") if code_col < len(row) else ""
+            if desc and code and desc != "nan" and code != "nan":
+                dt_legend[code.strip()] = desc.strip()
+        operators = []
+        for ridx in range(4,18):
+            row = df.iloc[ridx]
+            for cidx,val in enumerate(row):
+                cert = str(val).strip()
+                if cert in ("Certified","Training") and cidx+1<len(row):
+                    station = str(sf(row[cidx+1]) or "")
+                    if not station or station=="nan": continue
+                    nrow = df.iloc[ridx+1] if ridx+1<len(df) else None
+                    name = str(sf(nrow[cidx+1]) or "") if nrow is not None else ""
+                    if name and name!="nan":
+                        operators.append({"station":station,"name":name,"status":cert})
+        hour_slots = list(range(5,90,6))
+        stations = []
+        for ridx in range(24,36):
+            row = df.iloc[ridx]
+            initials = str(sf(row[0]) or "")
+            station  = str(sf(row[1]) or "")
+            if not initials or not station: continue
+            if initials in ("nan","Final","Total","Rejects","Reject"): continue
+            total   = sf(row[90]); rej_tot = sf(row[92]); oee = sf(row[97])
+            try: total   = int(float(total))   if total   else 0
+            except: total = 0
+            try: rej_tot = int(float(rej_tot)) if rej_tot else 0
+            except: rej_tot = 0
+            try: oee = float(oee) if oee is not None else None
+            except: oee = None
+            hours = []
+            hn = 1
+            for h in hour_slots:
+                actual = sf(row[h]) if h<len(row) else None
+                if actual is None: continue
+                try: actual = int(float(actual))
+                except: continue
+                if actual <= 0: continue
+                rejects  = sf(row[h+1]) if h+1<len(row) else None
+                downtime = sf(row[h+3]) if h+3<len(row) else None
+                code     = sf(row[h+4]) if h+4<len(row) else None
+                try: rejects  = int(float(rejects))  if rejects  else 0
+                except: rejects = 0
+                try: downtime = int(float(downtime)) if downtime else 0
+                except: downtime = 0
+                code_str = str(code).strip() if code else ""
+                hours.append({"hour":hn,"actual":actual,"rejects":rejects,
+                              "downtime_min":downtime,"downtime_code":code_str,
+                              "downtime_label":dt_legend.get(code_str,code_str)})
+                hn += 1
+            if not hours and total==0: continue
+            stations.append({"initials":initials,"station":station,"total":total,
+                              "total_rejects":rej_tot,"oee":oee,"hours":hours})
+        failure_start = total_col = None
+        for ridx in range(45,90):
+            row = df.iloc[ridx]
+            for cidx,val in enumerate(row):
+                if str(val).strip()=="Failure Mode": failure_start=ridx+2
+                if str(val).strip()=="Total Rejects by Failure Code": total_col=cidx
+            if failure_start and total_col: break
+        failure_modes = {}
+        if failure_start and total_col:
+            for ridx in range(failure_start,min(failure_start+40,len(df))):
+                row = df.iloc[ridx]
+                mode = str(sf(row[0]) or "")
+                if not mode or mode in ("nan","Daily Total Rejects"): continue
+                v = sf(row[total_col])
+                if v is None: continue
+                try:
+                    n = int(float(v))
+                    if n>0: failure_modes[mode]=n
+                except: pass
+        notes = []
+        for ridx in range(80,len(df)):
+            if str(sf(df.iloc[ridx][0]) or "").strip()=="Hour By Hour Notes":
+                for r2i in range(ridx+1,len(df)):
+                    r2row = df.iloc[r2i]
+                    t = str(sf(r2row[0]) or "")
+                    c = str(sf(r2row[5]) or "") if len(r2row)>5 else ""
+                    if t and c and t!="nan" and c!="nan":
+                        notes.append({"time":t,"note":c})
+                break
+        return {"facility":facility,**meta,"present":present,"absent":absent,
+                "dt_legend":dt_legend,"operators":operators,"stations":stations,
+                "failure_modes":failure_modes,"notes":notes}
+
+    # Handle zip or single CSV
+    results = []
+    try:
+        with _zf.ZipFile(_io.BytesIO(content_bytes)) as zf:
+            csv_names = sorted([n for n in zf.namelist() if n.lower().endswith(".csv")])
+            for name in csv_names:
+                try:
+                    raw = zf.read(name)
+                    p = _parse_one(raw)
+                    p["filename"] = name.split("/")[-1]
+                    results.append(p)
+                except Exception: pass
+    except _zf.BadZipFile:
+        try:
+            p = _parse_one(content_bytes)
+            p["filename"] = ""
+            results.append(p)
+        except Exception as e:
+            pass
+    return results
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  TAB 5 — HOUR BY HOUR
 # ╚══════════════════════════════════════════════════════════════════════════════
 with tabs[4]:
+    st.markdown("### ⏱ Hour by Hour Tracker")
+    st.markdown("""<div class="note-box">
+      📂 Upload the <b>AuST zip</b> and <b>CP zip</b> separately below — one zip per facility,
+      each containing all shift CSVs for the month.
+      &nbsp;|&nbsp; The DOR <code>.xlsm</code> file goes in the sidebar.
+    </div>""", unsafe_allow_html=True)
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown("**🔵 AuST HxH Zip**")
+        hxh_aust_f = st.file_uploader("AuST zip folder",
+                                       type=["zip","csv"], key="hxh_aust")
+    with col_r:
+        st.markdown("**🟢 CenterPoint HxH Zip**")
+        hxh_cp_f   = st.file_uploader("CP zip folder",
+                                       type=["zip","csv"], key="hxh_cp")
+
+    if "hxh_parsed" not in st.session_state:
+        st.session_state.hxh_parsed = []
+
+    for f_obj in [hxh_aust_f, hxh_cp_f]:
+        if f_obj:
+            results = _parse_hxh_bytes(f_obj.read())
+            added = 0
+            for r in results:
+                key = (r["facility"], r["date"], r["shift"])
+                if not any((p["facility"],p["date"],p["shift"])==key
+                           for p in st.session_state.hxh_parsed):
+                    st.session_state.hxh_parsed.append(r)
+                    added += 1
+            if added:
+                st.success(f"✅ {f_obj.name} — loaded {added} new shift(s)")
+            else:
+                st.info(f"{f_obj.name} — all shifts already loaded.")
+
+    parsed_all = st.session_state.hxh_parsed
+
+    if not parsed_all:
+        st.info("Upload AuST and/or CP HxH files above to view shift analysis.")
+    else:
+        # ── Filters ───────────────────────────────────────────────────────────
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        all_facilities = sorted(set(p["facility"] for p in parsed_all))
+        all_dates      = sorted(set(p["date"]     for p in parsed_all))
+        all_shifts     = sorted(set(p["shift"]     for p in parsed_all))
+
+        f_fac   = fc1.multiselect("Facility",  all_facilities, default=all_facilities, key="hxh_fac")
+        f_date  = fc2.multiselect("Date",       all_dates,      default=all_dates,      key="hxh_date")
+        f_shift = fc3.multiselect("Shift",      all_shifts,     default=all_shifts,     key="hxh_shift")
+        f_prod  = fc4.text_input("Product filter", placeholder="e.g. BLN", key="hxh_prod")
+
+        filtered_all = [p for p in parsed_all
+                        if p["facility"] in f_fac
+                        and p["date"]     in f_date
+                        and p["shift"]    in f_shift
+                        and (not f_prod or f_prod.upper() in p["product"].upper())]
+
+        if not filtered_all:
+            st.info("No shifts match the current filters.")
+        else:
+            labels = [f"{p['facility']} | {p['date']} | {p['shift']} | {p['product']}"
+                      for p in filtered_all]
+            sel = st.selectbox("Select Shift to View", range(len(labels)),
+                               format_func=lambda i: labels[i],
+                               index=len(labels)-1, key="hxh_sel")
+            p = filtered_all[sel]
+
+            shift_color = {"Days":"#2e75b6","Swings":"#70ad47","Weekends":"#9b59b6"}
+            color = shift_color.get(p["shift"], "#2e75b6")
+            st.markdown(f"""<div style="background:#1e2a3a;border-radius:10px;
+                padding:14px 18px;margin-bottom:16px;border-left:4px solid {color}">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:#fff;font-weight:700;font-size:16px">
+                  {p["facility"]} — {p["date"]} &nbsp;|&nbsp;
+                  <span style="color:{color}">{p["shift"]} Shift</span>
+                </span>
+                <span style="color:#8fa3b8;font-size:13px">
+                  {p["product"]} &nbsp;|&nbsp; Lot: {p["lot"]} &nbsp;|&nbsp; {p["duration"]}
+                </span>
+              </div>
+              <div style="color:#8fa3b8;font-size:12px;margin-top:6px">
+                👥 {p["present"]} present &nbsp;|&nbsp; ❌ {p["absent"]} absent
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            if p["stations"]:
+                # ── Hour-by-hour production ───────────────────────────────────
+                sec(f"Hour-by-Hour Production — {p['facility']} {p['shift']} Shift")
+                fig_hxh = go.Figure()
+                for s in p["stations"]:
+                    if not s["hours"]: continue
+                    fig_hxh.add_trace(go.Bar(
+                        name=s["station"],
+                        x=[f"Hour {h['hour']}" for h in s["hours"]],
+                        y=[h["actual"] for h in s["hours"]],
+                        hovertemplate=(f"<b>{s['station']}</b><br>"
+                                       "%{x}<br>Actual: %{y}<extra></extra>"),
+                    ))
+                fig_hxh.update_layout(**PLOT, margin=PLOT_MARGIN, height=350, barmode="group",
+                    yaxis=dict(showgrid=True, gridcolor="#2a3a4a", title="Units"),
+                    xaxis=dict(showgrid=False),
+                    title=dict(text="Units Produced per Hour by Station",
+                               font=dict(color="white", size=13)))
+                st.plotly_chart(fig_hxh, use_container_width=True)
+
+                # ── Rejects per hour ──────────────────────────────────────────
+                has_rejects = any(any(h["rejects"]>0 for h in s["hours"])
+                                  for s in p["stations"])
+                if has_rejects:
+                    sec("Rejects per Hour by Station")
+                    fig_rej = go.Figure()
+                    for s in p["stations"]:
+                        if not any(h["rejects"]>0 for h in s["hours"]): continue
+                        fig_rej.add_trace(go.Bar(
+                            name=s["station"],
+                            x=[f"Hour {h['hour']}" for h in s["hours"]],
+                            y=[h["rejects"] for h in s["hours"]],
+                            hovertemplate=(f"<b>{s['station']}</b><br>"
+                                           "%{x}<br>Rejects: %{y}<extra></extra>"),
+                        ))
+                    fig_rej.update_layout(**PLOT, margin=PLOT_MARGIN, height=280, barmode="stack",
+                        yaxis=dict(showgrid=True, gridcolor="#2a3a4a", title="Rejects"),
+                        xaxis=dict(showgrid=False))
+                    st.plotly_chart(fig_rej, use_container_width=True)
+
+                # ── Defects by product (HxH) ──────────────────────────────────
+                if p["failure_modes"]:
+                    sec("Defects by Product — This Shift")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        # Failure mode breakdown table
+                        df_fm = pd.DataFrame(
+                            sorted(p["failure_modes"].items(), key=lambda x:-x[1]),
+                            columns=["Failure Mode","Count"])
+                        total_fm = df_fm["Count"].sum()
+                        df_fm["% of Rejects"] = df_fm["Count"].apply(
+                            lambda v: f"{v/total_fm:.1%}" if total_fm>0 else "—")
+                        df_fm.index = range(1, len(df_fm)+1)
+                        st.markdown(f'<div class="sec">Failure Modes ({total_fm} total rejects)</div>',
+                                    unsafe_allow_html=True)
+                        st.dataframe(df_fm, use_container_width=True,
+                                     height=min(40*len(df_fm)+50, 350))
+
+                    with c2:
+                        # Pie chart of failure modes
+                        modes = [k for k,v in sorted(p["failure_modes"].items(),
+                                                      key=lambda x:-x[1])]
+                        counts = [p["failure_modes"][m] for m in modes]
+                        fig_pie = go.Figure(go.Pie(
+                            labels=modes, values=counts,
+                            hole=0.4,
+                            textfont=dict(color="white", size=11),
+                            hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
+                        ))
+                        fig_pie.update_layout(**PLOT, height=300,
+                            margin=dict(t=20,b=10,l=10,r=10),
+                            title=dict(text="Defect Mix",
+                                       font=dict(color="white",size=12)))
+                        st.plotly_chart(fig_pie, use_container_width=True)
+
+                    # Defects by product — per hour stacked bars
+                    # HxH files log which station the defect came from,
+                    # and station → product mapping from the lot info
+                    # Show per-hour defect totals with product from lot field
+                    prod_from_lot = p["product"]  # primary product this shift
+                    sec(f"Defects per Hour — {prod_from_lot} ({p['shift']} Shift)")
+                    # Aggregate rejects per hour across all stations
+                    hour_rejects = {}
+                    for s in p["stations"]:
+                        for h in s["hours"]:
+                            hr = h["hour"]
+                            if hr not in hour_rejects:
+                                hour_rejects[hr] = {"station_data":{}}
+                            hour_rejects[hr]["station_data"][s["station"]] = h["rejects"]
+
+                    if hour_rejects:
+                        hrs_sorted = sorted(hour_rejects.keys())
+                        all_stations = list({s["station"] for s in p["stations"]
+                                             if any(h["rejects"]>0 for h in s["hours"])})
+                        fig_hr = go.Figure()
+                        for station in all_stations:
+                            yvals = [hour_rejects.get(hr,{}).get("station_data",{}).get(station,0)
+                                     for hr in hrs_sorted]
+                            if sum(yvals)==0: continue
+                            fig_hr.add_trace(go.Bar(
+                                name=station,
+                                x=[f"Hour {h}" for h in hrs_sorted],
+                                y=yvals,
+                                hovertemplate=(f"<b>{station}</b><br>"
+                                               "%{x}: %{y} rejects<extra></extra>"),
+                            ))
+                        fig_hr.update_layout(**PLOT, margin=PLOT_MARGIN, height=300, barmode="stack",
+                            title=dict(text=f"Rejects per Hour by Station — {prod_from_lot}",
+                                       font=dict(color="white",size=13)),
+                            xaxis=dict(showgrid=False),
+                            yaxis=dict(showgrid=True, gridcolor="#2a3a4a",
+                                       title="Rejects"))
+                        st.plotly_chart(fig_hr, use_container_width=True)
+
+                # ── Station summary ───────────────────────────────────────────
+                sec("Station Summary")
+                df_s = pd.DataFrame([{
+                    "Station":    s["station"],
+                    "Total":      s["total"],
+                    "Rejects":    s["total_rejects"],
+                    "Reject %":   f"{s['total_rejects']/s['total']:.1%}"
+                                  if s["total"]>0 else "—",
+                    "OEE":        f"{s['oee']:.1%}" if s["oee"] else "—",
+                    "Hours Run":  len(s["hours"]),
+                } for s in p["stations"]])
+                if not df_s.empty:
+                    df_s.index = range(1, len(df_s)+1)
+                    st.dataframe(df_s, use_container_width=True)
+
+                # ── Operator assignments ──────────────────────────────────────
+                if p["operators"]:
+                    sec("Operator Station Assignments")
+                    df_ops = pd.DataFrame(p["operators"]).rename(columns={
+                        "station":"Station","name":"Operator","status":"Status"})
+                    df_ops = df_ops.drop_duplicates(subset=["Station","Operator"])
+                    df_ops.index = range(1, len(df_ops)+1)
+                    st.dataframe(df_ops, use_container_width=True)
+
+                # ── Shift notes ───────────────────────────────────────────────
+                if p["notes"]:
+                    sec("Shift Notes")
+                    for note in p["notes"]:
+                        st.markdown(f'''<div class="note-box">
+                          <b>{note["time"]}</b><br>
+                          <span style="color:#c0cfe0">{note["note"]}</span>
+                        </div>''', unsafe_allow_html=True)
+
+        if st.button("🗑 Clear all loaded HxH shifts", key="clear_hxh"):
+            st.session_state.hxh_parsed = []
+            st.rerun()
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  TAB 6 — DOWNTIME
+# ╚══════════════════════════════════════════════════════════════════════════════
+with tabs[5]:
+    st.markdown("### 📉 Downtime Analysis")
+
+    parsed_all_dt = st.session_state.get("hxh_parsed", [])
+    if not parsed_all_dt:
+        st.info("Upload HxH files in the **⏱ Hour by Hour** tab first — downtime data comes from the same files.")
+    else:
+        # Aggregate across all loaded shifts
+        from collections import defaultdict as _dd
+
+        # Filter controls
+        fc1, fc2, fc3 = st.columns(3)
+        all_facilities = sorted(set(p["facility"] for p in parsed_all_dt))
+        all_dates      = sorted(set(p["date"]     for p in parsed_all_dt))
+        f_fac  = fc1.multiselect("Facility", all_facilities, default=all_facilities)
+        f_date = fc2.multiselect("Date",     all_dates,      default=all_dates)
+        f_shift= fc3.multiselect("Shift",    ["Days","Swing","Weekend"],
+                                  default=["Days","Swing","Weekend"])
+
+        filtered = [p for p in parsed_all_dt
+                    if p["facility"] in f_fac
+                    and p["date"] in f_date
+                    and any(s.lower() in p["shift"].lower() for s in f_shift)]
+
+        if not filtered:
+            st.info("No shifts match the selected filters.")
+        else:
+            # Aggregate all downtime events
+            dt_by_station = _dd(int)
+            dt_by_code    = _dd(int)
+            dt_events     = []
+            code_to_label = {}
+
+            for p in filtered:
+                # Merge legend
+                code_to_label.update(p.get("dt_legend", {}))
+                for s in p["stations"]:
+                    for h in s["hours"]:
+                        mins = h["downtime_min"]
+                        code = h["downtime_code"]
+                        if mins > 0:
+                            dt_by_station[s["station"]] += mins
+                            dt_by_code[code] += mins
+                            label = p["dt_legend"].get(code, code) if code else "Unknown"
+                            dt_events.append({
+                                "date":     p["date"],
+                                "facility": p["facility"],
+                                "shift":    p["shift"],
+                                "station":  s["station"],
+                                "hour":     h["hour"],
+                                "minutes":  mins,
+                                "code":     code,
+                                "reason":   label,
+                            })
+
+            total_dt_mins = sum(dt_by_station.values())
+
+            # ── KPIs ──────────────────────────────────────────────────────────
+            sec("Downtime Summary")
+            dk1, dk2, dk3, dk4 = st.columns(4)
+            with dk1: kpi("Total Downtime",
+                          f"{total_dt_mins:,} min",
+                          f'<div class="kpi-delta-neutral">{total_dt_mins/60:.1f} hrs</div>',
+                          "#e05c5c")
+            with dk2: kpi("Shifts Analysed", str(len(filtered)), accent="#2e75b6")
+            with dk3: kpi("Avg per Shift",
+                          f"{total_dt_mins//len(filtered)} min" if filtered else "—",
+                          accent="#ffc000")
+            with dk4: kpi("Unique DT Codes", str(len(dt_by_code)), accent="#9b59b6")
+
+            c1, c2 = st.columns(2)
+
+            # Downtime by station
+            with c1:
+                sec("Downtime by Station (minutes)")
+                if dt_by_station:
+                    sorted_s = sorted(dt_by_station.items(), key=lambda x:-x[1])
+                    fig_dts = go.Figure(go.Bar(
+                        y=[x[0] for x in sorted_s][::-1],
+                        x=[x[1] for x in sorted_s][::-1],
+                        orientation="h",
+                        marker_color="#e05c5c",
+                        text=[f"{x[1]:,} min ({x[1]/total_dt_mins:.0%})"
+                              for x in sorted_s][::-1],
+                        textposition="outside",
+                        textfont=dict(color="white",size=10),
+                    ))
+                    fig_dts.update_layout(**PLOT, margin=PLOT_MARGIN, height=max(300,len(dt_by_station)*40),
+                        xaxis=dict(showgrid=True,gridcolor="#2a3a4a",title="Minutes"),
+                        yaxis=dict(showgrid=False,tickfont=dict(size=11)))
+                    st.plotly_chart(fig_dts, use_container_width=True)
+
+            # Downtime by reason code
+            with c2:
+                sec("Downtime by Reason Code")
+                if dt_by_code:
+                    # Categorise: planned vs unplanned
+                    PLANNED = {"P","Q","K","O","N"}  # Break, Lunch, Scheduled Maint, Production Complete, Materials Filled
+                    sorted_c = sorted(dt_by_code.items(), key=lambda x:-x[1])
+                    labels_c = [f"{k}: {code_to_label.get(k,k)}" for k,v in sorted_c]
+                    values_c = [v for k,v in sorted_c]
+                    colors_c = ["#4472c4" if k in PLANNED else "#e05c5c"
+                                for k,v in sorted_c]
+                    fig_dtc = go.Figure(go.Bar(
+                        y=labels_c[::-1], x=values_c[::-1],
+                        orientation="h",
+                        marker_color=colors_c[::-1],
+                        text=[f"{v:,} min" for v in values_c][::-1],
+                        textposition="outside",
+                        textfont=dict(color="white",size=10),
+                    ))
+                    fig_dtc.update_layout(**PLOT, margin=PLOT_MARGIN, height=max(300,len(dt_by_code)*36),
+                        xaxis=dict(showgrid=True,gridcolor="#2a3a4a",title="Minutes"),
+                        yaxis=dict(showgrid=False,tickfont=dict(size=10)),
+                        title=dict(text="🔴 Unplanned  🔵 Planned",
+                                   font=dict(color="#8fa3b8",size=11)))
+                    st.plotly_chart(fig_dtc, use_container_width=True)
+
+            # Downtime events table
+            if dt_events:
+                sec("All Downtime Events")
+                df_dte = pd.DataFrame(dt_events).sort_values(
+                    ["date","facility","shift","station","hour"])
+                df_dte["Planned"] = df_dte["code"].apply(
+                    lambda c: "✅ Planned" if c in {"P","Q","K","O","N"} else "🔴 Unplanned")
+                df_dte = df_dte.rename(columns={
+                    "date":"Date","facility":"Facility","shift":"Shift",
+                    "station":"Station","hour":"Hour",
+                    "minutes":"Minutes","code":"Code","reason":"Reason"})
+                df_dte = df_dte[["Date","Facility","Shift","Station",
+                                  "Hour","Code","Reason","Minutes","Planned"]]
+                df_dte.index = range(1,len(df_dte)+1)
+                st.dataframe(df_dte, use_container_width=True, height=400)
+
+            # Planned vs unplanned summary
+            sec("Planned vs Unplanned Downtime")
+            PLANNED_CODES = {"P","Q","K","O","N"}
+            planned_mins   = sum(v for k,v in dt_by_code.items() if k in PLANNED_CODES)
+            unplanned_mins = total_dt_mins - planned_mins
+            if total_dt_mins > 0:
+                p1, p2, p3 = st.columns(3)
+                with p1: kpi("Planned DT",   f"{planned_mins:,} min",
+                             f'<div class="kpi-delta-neutral">{planned_mins/total_dt_mins:.0%} of total</div>',
+                             "#2e75b6")
+                with p2: kpi("Unplanned DT", f"{unplanned_mins:,} min",
+                             f'<div class="kpi-delta-bad">{unplanned_mins/total_dt_mins:.0%} of total</div>',
+                             "#e05c5c")
+                with p3:
+                    fig_pie = go.Figure(go.Pie(
+                        values=[planned_mins, unplanned_mins],
+                        labels=["Planned","Unplanned"],
+                        marker_colors=["#2e75b6","#e05c5c"],
+                        hole=0.5,
+                        textfont=dict(color="white"),
+                    ))
+                    fig_pie.update_layout(**PLOT, height=180,
+                        margin=dict(t=10,b=10,l=10,r=10),
+                        showlegend=False)
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════
+# ║  TAB 7 — GOALS
+# ╚══════════════════════════════════════════════════════════════════════════════
+with tabs[6]:
     st.markdown("### 🎯 Goals & Targets")
     st.markdown("""<div class="note-box">
       ⚠️ <b>Goals not yet set.</b> This section is ready to populate
